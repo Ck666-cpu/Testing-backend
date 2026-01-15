@@ -3,7 +3,7 @@ import os
 import sys
 import tempfile
 
-# Add current folder to path so we can import 'app'
+# Add current folder to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from app.services.crag_service import CRAGService
@@ -13,66 +13,79 @@ from app.core.security import RBAC, UserRole
 st.set_page_config(layout="wide", page_title="CRAG Logic Tester")
 
 st.title("🏗️ CRAG Backend Logic Tester")
-st.markdown("Use this to test the **Phi-3**, **Reranker**, and **RBAC** logic directly.")
 
-# --- SIDEBAR: CONFIG & SECURITY ---
+# --- 1. SESSION STATE SETUP ---
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+
+# --- 2. CACHED RESOURCE LOADING (THE FIX) ---
+# This prevents the app from reloading the AI models on every interaction
+@st.cache_resource(show_spinner="Loading AI Models (Phi-3 & Embeddings)...")
+def load_crag_brain():
+    print(" [Streamlit] Loading CRAG Service for the first time...")
+    return CRAGService()
+
+
+try:
+    # Load the brain
+    crag_brain = load_crag_brain()
+    st.success("System Ready & Loaded!")
+except Exception as e:
+    st.error(f"Failed to load backend: {e}")
+    st.stop()
+
+# --- 3. SIDEBAR ---
 with st.sidebar:
-    st.header("1. Security Simulation (RBAC)")
-    # Select a Role to simulate
-    current_role = st.selectbox(
-        "Simulate User Role:",
-        [UserRole.ADMIN, UserRole.AGENT, UserRole.GUEST]
-    )
-    st.info(f"Current Permissions: {RBAC.PERMISSIONS[current_role]}")
+    st.header("1. Security Simulation")
+    current_role = st.selectbox("Simulate Role:", [UserRole.ADMIN, UserRole.AGENT, UserRole.GUEST])
 
     st.header("2. Data Ingestion")
     uploaded_file = st.file_uploader("Upload Knowledge (PDF/TXT)")
 
-    if uploaded_file:
-        if st.button("Ingest to Qdrant"):
-            # Check RBAC Permission First!
-            if RBAC.check_access(current_role, "ingest_documents"):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp:
-                    tmp.write(uploaded_file.getvalue())
-                    tmp_path = tmp.name
+    if uploaded_file and st.button("Ingest"):
+        if RBAC.check_access(current_role, "ingest_documents"):
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp:
+                tmp.write(uploaded_file.getvalue())
+                tmp_path = tmp.name
 
-                service = VectorService()
-                result = service.ingest_document(tmp_path)
-                st.success(result)
-                os.remove(tmp_path)
-            else:
-                st.error("⛔ ACCESS DENIED: You need 'ingest_documents' permission.")
+            # Note: VectorService is light enough to instantiate here, 
+            # or you could add a method to crag_brain to handle ingestion
+            service = VectorService()
+            result = service.ingest_document(tmp_path)
+            st.success(result)
+            os.remove(tmp_path)
+        else:
+            st.error("⛔ ACCESS DENIED")
 
-# --- MAIN: CHAT ---
-st.header("3. Chat Test (Phi-3 + CRAG)")
+# --- 4. MAIN CHAT INTERFACE ---
+st.header("3. Chat Test")
 
-# Initialize Service Logic
-if "crag_brain" not in st.session_state:
-    with st.spinner("Loading Phi-3 & Rerankers..."):
-        st.session_state.crag_brain = CRAGService()
-    st.success("System Ready")
+# Display History
+for msg in st.session_state.chat_history:
+    role = "👤 You" if msg["role"] == "user" else "🤖 Bot"
+    st.text(f"{role}: {msg['content']}")
 
-query = st.text_input("Ask a question:")
+query = st.text_input("Ask a question:", key="query_input")
 
-if st.button("Generate Answer"):
-    # 1. Security Check
+if st.button("Generate Answer") and query:
     if not RBAC.check_access(current_role, "chat_rag"):
-        st.error("⛔ ACCESS DENIED: Guests cannot use the AI Chat.")
+        st.error("⛔ ACCESS DENIED")
     else:
-        # 2. Run Logic
-        with st.spinner("Running CRAG Pipeline (Retrieve -> Rerank -> Correct -> Generate)..."):
-            response = st.session_state.crag_brain.generate_response(query)
+        # Prepare history
+        history_text_list = [f"{msg['role']}: {msg['content']}" for msg in st.session_state.chat_history[-4:]]
 
-            # Display Result
+        with st.spinner("Thinking..."):
+            # Use the cached brain
+            response = crag_brain.generate_response(query, history_text_list)
+
             st.markdown("### 🤖 Answer:")
             st.write(str(response))
 
-            # Debug Info (Show what logic happened)
-            with st.expander("See Backend Details"):
+            # Save to history
+            st.session_state.chat_history.append({"role": "user", "content": query})
+            st.session_state.chat_history.append({"role": "assistant", "content": str(response)})
+
+            with st.expander("Debug Details"):
                 if hasattr(response, 'source_nodes'):
-                    st.write(f"Sources Found: {len(response.source_nodes)}")
-                    for node in response.source_nodes:
-                        st.caption(f"Score: {node.score:.4f}")
-                        st.text(node.get_content()[:200] + "...")
-                else:
-                    st.warning("No sources used (Fallback triggered).")
+                    st.write(f"Sources: {len(response.source_nodes)}")

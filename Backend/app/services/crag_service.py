@@ -1,3 +1,4 @@
+from typing import List
 from llama_index.llms.ollama import Ollama
 from llama_index.core import Settings as LlamaSettings, get_response_synthesizer, PromptTemplate
 from llama_index.core.retrievers import VectorIndexRetriever
@@ -10,76 +11,87 @@ class CRAGService:
     def __init__(self):
         print(f" [CRAG] Initializing with Model: {settings.LLM_MODEL}...")
 
-        # 1. Setup Phi-3 (SLM)
+        # 1. Setup Phi-3 (SLM) with Memory Limits
         self.llm = Ollama(
             model=settings.LLM_MODEL,
             request_timeout=300.0,
-            additional_kwargs={
-                "num_ctx": 2048,  # Limits memory usage to ~2GB
-                "num_predict": 512  # Limits the answer length
-            }
+            additional_kwargs={"num_ctx": 2048, "num_predict": 512}
         )
         LlamaSettings.llm = self.llm
 
-        # 2. Setup Vector Store Connection
+        # 2. Setup Vector Store & Reranker
         self.vector_service = VectorService()
         self.index = self.vector_service.get_index()
-
-        # 3. Setup Reranker (Cross-Encoder)
         self.reranker = SentenceTransformerRerank(
-            model=settings.RERANKER_MODEL,
-            top_n=3  # Only keep top 3 most relevant chunks
+            model=settings.RERANKER_MODEL, top_n=3
         )
 
-        # 4. Corrective Evaluator Prompt (Self-Correction)
+        # 3. PROMPTS
+        # A. Relevance Check (CRAG)
         self.eval_prompt = PromptTemplate(
             "Context: {context_str}\n"
             "Question: {query_str}\n"
-            "Instruction: Rate if the Context contains the answer to the Question.\n"
-            "Answer ONLY 'YES' or 'NO'."
+            "Instruction: Does the Context answer the Question? Answer YES or NO."
         )
 
-    def generate_response(self, query: str):
+        # B. History Rewriter (NEW)
+        self.rewrite_prompt = PromptTemplate(
+            "History:\n{history_str}\n\n"
+            "Current Question: {query_str}\n"
+            "Task: Rewrite the Current Question to be standalone, including necessary details from History.\n"
+            "Rewritten Question:"
+        )
+
+    def generate_response(self, query: str, history: List[str] = []):
         """
-        Full CRAG Pipeline: Retrieve -> Rerank -> Correct/Evaluate -> Generate
+        Full Pipeline: Rewrite -> Retrieve -> Rerank -> Correct -> Generate
         """
-        print(f" [CRAG] Processing: {query}")
+        # Step 0: Contextualize (Rewrite Query)
+        search_query = query
+        if history:
+            print(f" [CRAG] Rewriting query based on history...")
+            search_query = self._rewrite_query(query, history)
+            print(f" [CRAG] Rewritten: '{search_query}'")
 
         # Step A: Retrieve
         retriever = VectorIndexRetriever(index=self.index, similarity_top_k=10)
-        nodes = retriever.retrieve(query)
+        nodes = retriever.retrieve(search_query)
 
-        # Step B: Rerank (Cross-Encoder)
+        # Step B: Rerank
         if nodes:
-            nodes = self.reranker.postprocess_nodes(nodes, query_str=query)
+            nodes = self.reranker.postprocess_nodes(nodes, query_str=search_query)
 
-        # Step C: Corrective Evaluation (The "C" in CRAG)
-        # We check if the top node is actually relevant before generating.
-        is_relevant = self._evaluate_relevance(query, nodes)
+        # Step C: Corrective Evaluation
+        is_relevant = self._evaluate_relevance(search_query, nodes)
 
         if not is_relevant:
-            # FALLBACK MECHANISM (Since we are local/intranet, we can't Google Search)
-            # We return a safe fallback message.
-            return "I searched the internal database, but the retrieved documents do not seem relevant to your specific question. Please contact an admin to upload more data."
+            return "I couldn't find relevant information in the internal database for that specific question."
 
-        # Step D: Generate Answer (Phi-3)
-        # Using a synthesizer to combine context and question
+        # Step D: Generate Answer
         synthesizer = get_response_synthesizer(response_mode="compact")
-        response = synthesizer.synthesize(query, nodes=nodes)
+        response = synthesizer.synthesize(search_query, nodes=nodes)
 
         return response
 
+    def _rewrite_query(self, query: str, history: List[str]) -> str:
+        """Uses Phi-3 to merge history into the new question"""
+        try:
+            # Only use last 2 turns to keep it fast
+            history_str = "\n".join(history[-2:])
+            prompt = self.rewrite_prompt.format(history_str=history_str, query_str=query)
+
+            response = self.llm.complete(prompt).text.strip()
+
+            # Sanity check: If rewrite is empty or fails, use original
+            return response if len(response) > 3 else query
+        except Exception as e:
+            print(f"Warning: Rewrite failed ({e}). Using original query.")
+            return query
+
     def _evaluate_relevance(self, query, nodes):
-        """Uses the LLM to double-check if the docs are actually useful."""
-        if not nodes:
-            return False
-
-        # Check the top 1 result for speed
-        context_text = nodes[0].get_content()
+        """Double-check if documents match the query"""
+        if not nodes: return False
+        context_text = nodes[0].get_content()[:500]  # Check first 500 chars of top result
         prompt = self.eval_prompt.format(context_str=context_text, query_str=query)
-
-        # Ask Phi-3 if it's relevant
         verdict = self.llm.complete(prompt).text.strip().upper()
-        print(f" [CRAG] Relevance Check: {verdict}")
-
         return "YES" in verdict
