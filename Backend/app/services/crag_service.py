@@ -11,7 +11,14 @@ class CRAGService:
         print(f" [CRAG] Initializing with Model: {settings.LLM_MODEL}...")
 
         # 1. Setup Phi-3 (SLM)
-        self.llm = Ollama(model=settings.LLM_MODEL, request_timeout=300.0)
+        self.llm = Ollama(
+            model=settings.LLM_MODEL,
+            request_timeout=300.0,
+            additional_kwargs={
+                "num_ctx": 2048,  # Limits memory usage to ~2GB
+                "num_predict": 512  # Limits the answer length
+            }
+        )
         LlamaSettings.llm = self.llm
 
         # 2. Setup Vector Store Connection
