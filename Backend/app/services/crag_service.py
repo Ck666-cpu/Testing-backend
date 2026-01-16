@@ -51,6 +51,7 @@ class CRAGService:
     def generate_response(self, query: str, history: List[str] = []) -> str:
         """
         Pipeline: Classify -> Gatekeep -> Route -> Execute
+        Returns a Dictionary: {'answer': str, 'sources': List[str]}
         """
         # STEP 1: CLASSIFY INTENT
         category = self._classify_input(query)
@@ -59,10 +60,10 @@ class CRAGService:
         # STEP 2: HANDLE NON-RETRIEVAL CATEGORIES
 
         if category == "GREETING":
-            return "Hello! I am your Real Estate AI Assistant. I can help with tenancy agreements and property questions."
+            return {"answer": "Hello! I am your Real Estate AI Assistant...", "sources": []}
 
         if category == "GENERAL":
-            return "I am designed specifically for Real Estate queries. I cannot answer general questions about the weather, date, or outside topics."
+            return {"answer": "I am designed specifically for Real Estate queries...", "sources": []}
 
         # STEP 3: HANDLE RETRIEVAL CATEGORIES (DOMAIN & DEPENDENT)
         search_query = query
@@ -99,8 +100,7 @@ class CRAGService:
         except:
             return "DOMAIN"
 
-    def _run_rag_pipeline(self, search_query: str):
-        """Standard RAG: Retrieve -> Rerank -> Synthesize"""
+    def _run_rag_pipeline(self, search_query: str) -> dict:
         # 1. Retrieve
         retriever = VectorIndexRetriever(index=self.index, similarity_top_k=15)
         nodes = retriever.retrieve(search_query)
@@ -109,14 +109,31 @@ class CRAGService:
         if nodes:
             nodes = self.reranker.postprocess_nodes(nodes, query_str=search_query)
 
-        # 3. Check if empty after rerank
-        if not nodes:
-            return "I searched the internal database, but I couldn't find specific information regarding that."
-
+        # 3. Check emptiness
+        # If the best match has a score lower than 0.5, it's probably junk.
+        if not nodes or (nodes[0].score is not None and nodes[0].score < 0.2):  # Threshold varies by model
+            print(f" [CRAG] Low confidence score: {nodes[0].score if nodes else 0}")
+            return {
+                "answer": "I found some documents, but they don't seem closely related to your question. Could you be more specific?",
+                "sources": []
+            }
         # 4. Generate Answer
         synthesizer = get_response_synthesizer(response_mode="compact")
-        response = synthesizer.synthesize(search_query, nodes=nodes)
-        return str(response)
+        response_obj = synthesizer.synthesize(search_query, nodes=nodes)
+
+        # 5. Extract Sources (NEW)
+        source_list = []
+        for node in response_obj.source_nodes:
+            # LlamaIndex stores metadata in node.metadata
+            file_name = node.metadata.get("file_name", "Unknown File")
+            page_label = node.metadata.get("page_label", "N/A")
+            score = f"{node.score:.2f}" if node.score else "N/A"
+            source_list.append(f"{file_name} (Page {page_label}) - Score: {score}")
+
+        return {
+            "answer": str(response_obj),
+            "sources": source_list[:3]  # Return top 3 unique sources
+        }
 
     def _rewrite_query(self, query: str, history: List[str]) -> str:
         try:

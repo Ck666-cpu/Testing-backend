@@ -98,11 +98,21 @@ if st.button("Send") and query:
         history_text = [f"{m['role']}: {m['content']}" for m in st.session_state.chat_history[-4:]]
 
         with st.spinner("Processing..."):
-            response = crag_brain.generate_response(query, history_text)
+            # The response is now a DICTIONARY
+            response_data = crag_brain.generate_response(query, history_text)
+
+            answer = response_data["answer"]
+            sources = response_data["sources"]
 
             st.markdown("### 🤖 Answer:")
-            st.write(response)
+            st.write(answer)
 
-            # Update History
+            # DISPLAY SOURCES (NEW)
+            if sources:
+                with st.expander("📚 Reference Documents"):
+                    for src in sources:
+                        st.caption(f"📄 {src}")
+
+            # Update History (Store just the answer string)
             st.session_state.chat_history.append({"role": "user", "content": query})
-            st.session_state.chat_history.append({"role": "assistant", "content": response})
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
