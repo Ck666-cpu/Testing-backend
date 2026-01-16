@@ -1,5 +1,6 @@
 from typing import List
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, StorageContext, Settings as LlamaSettings
+from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from qdrant_client import QdrantClient
@@ -11,12 +12,18 @@ class VectorService:
     def __init__(self):
         print(" [VectorStore] Initializing Embedding Model & Settings...")
 
-        # 1. Tuning for BGE-Small (Max 512 tokens)
+        # --- TUNING 4.3: Legal Chunking Strategy ---
+        # Legal texts are dense. Smaller chunks (300-500) ensure the embedding
+        # captures the specific clause/rule without noise.
         LlamaSettings.chunk_size = 512
-        LlamaSettings.chunk_overlap = 50
+        LlamaSettings.chunk_overlap = 100  # Good overlap ensures clauses aren't cut in half
 
-        # Load Embedding Model locally
-        LlamaSettings.embed_model = HuggingFaceEmbedding(model_name=settings.EMBEDDING_MODEL)
+        # --- TUNING 4.2: Query Instruction (BGE Specific) ---
+        # BGE models perform better when told what the query represents.
+        LlamaSettings.embed_model = HuggingFaceEmbedding(
+            model_name=settings.EMBEDDING_MODEL,
+            query_instruction="Represent this sentence for searching relevant legal and real estate documents: "
+        )
         print(" [VectorStore] Embedding Model Loaded.")
 
         self.client = QdrantClient(url=settings.QDRANT_URL)
@@ -27,7 +34,7 @@ class VectorService:
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
-                    size=384,
+                    size=768,  # BGE-BASE uses 768 dimensions (Small uses 384)
                     distance=models.Distance.COSINE
                 )
             )
@@ -42,45 +49,44 @@ class VectorService:
         )
 
     def ingest_document(self, file_path: str):
+        # --- TUNING 4.4: Metadata ---
+        # SimpleDirectoryReader automatically adds file_name.
+        # We enforce the specific splitter here to ensure chunking is applied during ingestion.
+        parser = SentenceSplitter(chunk_size=512, chunk_overlap=100)
+
         documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
-        VectorStoreIndex.from_documents(
-            documents,
+
+        # Apply parser
+        nodes = parser.get_nodes_from_documents(documents)
+
+        VectorStoreIndex(
+            nodes,
             storage_context=self.storage_context,
             show_progress=True
         )
-        return f"Successfully ingested {len(documents)} pages."
+        return f"Successfully ingested {len(nodes)} chunks (Legal Optimized)."
 
     def clear_database(self):
         self.client.delete_collection(self.collection_name)
         return "Database cleared! Please re-ingest your documents."
 
     def list_ingested_files(self) -> List[str]:
-        """
-        Scrolls through the Qdrant database to find unique file names in metadata.
-        """
         try:
-            # We scroll through points to get metadata
-            # This is a basic implementation; for millions of points, you'd use a Payload index.
             response = self.client.scroll(
                 collection_name=self.collection_name,
-                limit=100,  # Check first 100 chunks (usually enough to see files)
+                limit=100,
                 with_payload=True,
                 with_vectors=False
             )
-
             seen_files = set()
             points, _ = response
-
             for point in points:
                 payload = point.payload or {}
-                # LlamaIndex usually stores file_name in metadata keys like 'file_name' or 'node_info'
-                # Depending on version, it might be directly in payload
-                f_name = payload.get("file_name") or payload.get("metadata", {}).get("file_name")
-                if f_name:
-                    # Clean path to just show filename
+                # Handle different metadata structures
+                f_name = payload.get("file_name") or payload.get("metadata", {}).get("file_name") or "Unknown"
+                if f_name != "Unknown":
                     clean_name = f_name.split("/")[-1].split("\\")[-1]
                     seen_files.add(clean_name)
-
             return list(seen_files) if seen_files else ["No metadata found (Index might be empty)"]
         except Exception as e:
             return [f"Error fetching files: {str(e)}"]

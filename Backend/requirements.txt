@@ -4,3 +4,4 @@ llama-index-vector-stores-qdrant
 llama-index-embeddings-huggingface
 qdrant-client
 streamlit
+docx2txt

@@ -27,28 +27,34 @@ except Exception as e:
     st.error(f"Error loading models: {e}")
     st.stop()
 
-# --- SESSION STATE ---
+# --- SESSION STATE SETUP ---
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
+# ✅ 1. Session Memory: User Name
+if "user_name" not in st.session_state:
+    st.session_state.user_name = None
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("1. Security Simulation")
     current_role = st.selectbox("Role:", [UserRole.ADMIN, UserRole.AGENT, UserRole.GUEST])
 
+    # ✅ Debug Info: Show current session memory
+    if st.session_state.user_name:
+        st.info(f"🧠 Memory: User Name = {st.session_state.user_name}")
+
     st.divider()
 
-    # --- NEW: VIEW STORED DOCS (ADMIN ONLY) ---
     st.header("2. Knowledge Base")
     if current_role == UserRole.ADMIN:
         if st.button("🔄 Refresh Document List"):
-            # We instantiate VectorService purely for this check
             vs = VectorService()
             files = vs.list_ingested_files()
             st.session_state.doc_list = files
 
         if "doc_list" in st.session_state:
-            st.caption("Files currently in Qdrant:")
+            st.caption("Files in Qdrant:")
             for f in st.session_state.doc_list:
                 st.code(f, language="text")
     else:
@@ -92,27 +98,41 @@ if st.button("Send") and query:
     if not RBAC.check_access(current_role, "chat_rag"):
         st.error("Access Denied")
     else:
-        # FILTER CONTEXT: We only want to pass 'informational' turns to the AI,
-        # but for simplicity in this test tool, we pass the last 4 messages.
-        # The backend 'Gatekeeper' handles the actual retrieval logic.
         history_text = [f"{m['role']}: {m['content']}" for m in st.session_state.chat_history[-4:]]
+        user_context = {"user_name": st.session_state.user_name}
 
         with st.spinner("Processing..."):
-            # The response is now a DICTIONARY
-            response_data = crag_brain.generate_response(query, history_text)
+            response_data = crag_brain.generate_response(query, history_text, user_context)
 
             answer = response_data["answer"]
-            sources = response_data["sources"]
+            sources = response_data.get("sources", [])
+            intent = response_data.get("intent", "UNKNOWN")
+            updates = response_data.get("session_updates", {})
+            debug_nodes = response_data.get("debug_nodes", [])  # NEW
+
+            if "user_name" in updates:
+                st.session_state.user_name = updates["user_name"]
+                st.toast(f"Memory Updated: Call me {updates['user_name']}!")
 
             st.markdown("### 🤖 Answer:")
             st.write(answer)
 
-            # DISPLAY SOURCES (NEW)
             if sources:
-                with st.expander("📚 Reference Documents"):
+                with st.expander("📚 Reference Documents (Sources)"):
                     for src in sources:
                         st.caption(f"📄 {src}")
 
-            # Update History (Store just the answer string)
+            # --- TUNING 3.5: Admin Debug Mode ---
+            # Shows why retrieval happened (or failed)
+            if current_role == UserRole.ADMIN:
+                with st.expander("🛠️ ADMIN DEBUG: Retrieval Details"):
+                    st.write(f"**Intent:** {intent}")
+                    st.write("**Retrieved Chunks (Top 5 Reranked):**")
+                    if debug_nodes:
+                        for d_node in debug_nodes:
+                            st.code(d_node, language="text")
+                    else:
+                        st.warning("No nodes passed the confidence threshold (0.35).")
+
             st.session_state.chat_history.append({"role": "user", "content": query})
             st.session_state.chat_history.append({"role": "assistant", "content": answer})
