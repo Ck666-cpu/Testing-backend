@@ -34,7 +34,7 @@ class VectorService:
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
-                    size=768,  # BGE-BASE uses 768 dimensions (Small uses 384)
+                    size=1024,
                     distance=models.Distance.COSINE
                 )
             )
