@@ -2,6 +2,8 @@ import streamlit as st
 import os
 import sys
 import tempfile
+import uuid
+from datetime import datetime
 
 # Add current folder to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -22,33 +24,99 @@ def load_crag_brain():
 
 try:
     crag_brain = load_crag_brain()
-    st.success("System Ready")
+    # st.success("System Ready") # Removed to reduce clutter
 except Exception as e:
     st.error(f"Error loading models: {e}")
     st.stop()
 
-# --- SESSION STATE SETUP ---
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+# --- 1. SESSION MANAGEMENT LOGIC (NEW) ---
 
-# ✅ 1. Session Memory: User Name
-if "user_name" not in st.session_state:
-    st.session_state.user_name = None
+if "sessions" not in st.session_state:
+    # Initialize with one empty session
+    default_id = str(uuid.uuid4())[:8]
+    st.session_state.sessions = {
+        default_id: {
+            "title": "New Chat",
+            "history": [],
+            "context": {"user_name": None}  # Per-session memory
+        }
+    }
+    st.session_state.current_session_id = default_id
+
+
+def create_new_session():
+    new_id = str(uuid.uuid4())[:8]
+    st.session_state.sessions[new_id] = {
+        "title": f"New Chat {len(st.session_state.sessions) + 1}",
+        "history": [],
+        "context": {"user_name": None}
+    }
+    st.session_state.current_session_id = new_id
+
+
+def delete_session(session_id):
+    if len(st.session_state.sessions) > 1:
+        del st.session_state.sessions[session_id]
+        # Switch to another available session
+        st.session_state.current_session_id = list(st.session_state.sessions.keys())[0]
+
+
+# Get Active Session Data
+active_id = st.session_state.current_session_id
+active_session = st.session_state.sessions[active_id]
+active_history = active_session["history"]
+active_context = active_session["context"]
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("1. Security Simulation")
-    current_role = st.selectbox("Role:", [UserRole.ADMIN, UserRole.AGENT, UserRole.GUEST])
+    st.header("1. Chat Sessions")
 
-    # ✅ Debug Info: Show current session memory
-    if st.session_state.user_name:
-        st.info(f"🧠 Memory: User Name = {st.session_state.user_name}")
+    # NEW CHAT BUTTON
+    if st.button("➕ Start New Chat", use_container_width=True):
+        create_new_session()
+        st.rerun()
 
-    st.divider()
+    st.markdown("---")
+    st.caption("Active Conversations:")
 
-    st.header("2. Knowledge Base")
+    # SESSION LIST SELECTOR
+    # We use a radio button to simulate switching chats
+    session_options = {sid: s["title"] for sid, s in st.session_state.sessions.items()}
+
+    selected_session = st.radio(
+        "Select Chat:",
+        options=list(session_options.keys()),
+        format_func=lambda x: session_options[x],
+        index=list(session_options.keys()).index(active_id),
+        key="session_selector"
+    )
+
+    # Handle Switching
+    if selected_session != active_id:
+        st.session_state.current_session_id = selected_session
+        st.rerun()
+
+    # RENAME / DELETE CURRENT CHAT
+    with st.expander("⚙️ Session Options"):
+        new_title = st.text_input("Rename Chat:", value=active_session["title"])
+        if new_title != active_session["title"]:
+            active_session["title"] = new_title
+            st.rerun()
+
+        if st.button("🗑️ Delete This Chat", type="primary"):
+            delete_session(active_id)
+            st.rerun()
+
+    st.markdown("---")
+    st.header("2. Security & Data")
+    current_role = st.selectbox("Simulate Role:", [UserRole.ADMIN, UserRole.AGENT, UserRole.GUEST])
+
+    # Debug Info
+    if active_context.get("user_name"):
+        st.info(f"🧠 Memory: Name = {active_context['user_name']}")
+
     if current_role == UserRole.ADMIN:
-        if st.button("🔄 Refresh Document List"):
+        if st.button("🔄 Check Knowledge Base"):
             vs = VectorService()
             files = vs.list_ingested_files()
             st.session_state.doc_list = files
@@ -57,13 +125,8 @@ with st.sidebar:
             st.caption("Files in Qdrant:")
             for f in st.session_state.doc_list:
                 st.code(f, language="text")
-    else:
-        st.caption("🔒 Document list hidden (Admin only)")
 
-    st.divider()
-
-    st.header("3. Ingestion")
-    if st.button("⚠️ Reset Database"):
+    if st.button("⚠️ Reset Database (Admin)"):
         if RBAC.check_access(current_role, "delete_documents"):
             vs = VectorService()
             st.warning(vs.clear_database())
@@ -84,55 +147,67 @@ with st.sidebar:
         else:
             st.error("Access Denied")
 
-# --- MAIN CHAT ---
-st.header("4. Chat Interface")
+# --- MAIN CHAT INTERFACE ---
+st.subheader(f"💬 {active_session['title']}")
 
-# Display History
-for msg in st.session_state.chat_history:
+# Display History for CURRENT Session
+for msg in active_history:
     role = "👤 You" if msg["role"] == "user" else "🤖 Bot"
-    st.text(f"{role}: {msg['content']}")
+    # Helper to render clean markdown
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        # If there are sources, show them in a collapsed view
+        if "sources" in msg and msg["sources"]:
+            with st.expander("📚 Sources"):
+                for src in msg["sources"]:
+                    st.caption(src)
 
-query = st.text_input("Ask a question:", key="q_input")
+# Input
+query = st.chat_input("Ask a question...")
 
-if st.button("Send") and query:
+if query:
     if not RBAC.check_access(current_role, "chat_rag"):
         st.error("Access Denied")
     else:
-        history_text = [f"{m['role']}: {m['content']}" for m in st.session_state.chat_history[-4:]]
-        user_context = {"user_name": st.session_state.user_name}
+        # 1. Display User Message Immediately
+        with st.chat_message("user"):
+            st.markdown(query)
+        active_history.append({"role": "user", "content": query})
 
-        with st.spinner("Processing..."):
-            response_data = crag_brain.generate_response(query, history_text, user_context)
+        # 2. Prepare Context (Last 4 turns of THIS session)
+        history_text_list = [f"{m['role']}: {m['content']}" for m in active_history[-5:]]
+
+        with st.spinner("Thinking..."):
+            # 3. Call Backend
+            response_data = crag_brain.generate_response(query, history_text_list, active_context)
 
             answer = response_data["answer"]
             sources = response_data.get("sources", [])
-            intent = response_data.get("intent", "UNKNOWN")
             updates = response_data.get("session_updates", {})
-            debug_nodes = response_data.get("debug_nodes", [])  # NEW
 
+            # 4. Handle Memory Updates (Per Session)
             if "user_name" in updates:
-                st.session_state.user_name = updates["user_name"]
-                st.toast(f"Memory Updated: Call me {updates['user_name']}!")
+                active_context["user_name"] = updates["user_name"]
+                st.toast(f"I'll remember to call you {updates['user_name']} in this chat.")
 
-            st.markdown("### 🤖 Answer:")
-            st.write(answer)
+            # 5. Display Bot Response
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+                if sources:
+                    with st.expander("📚 Sources"):
+                        for src in sources:
+                            st.caption(src)
 
-            if sources:
-                with st.expander("📚 Reference Documents (Sources)"):
-                    for src in sources:
-                        st.caption(f"📄 {src}")
+            # 6. Save to History
+            active_history.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": sources
+            })
 
-            # --- TUNING 3.5: Admin Debug Mode ---
-            # Shows why retrieval happened (or failed)
-            if current_role == UserRole.ADMIN:
-                with st.expander("🛠️ ADMIN DEBUG: Retrieval Details"):
-                    st.write(f"**Intent:** {intent}")
-                    st.write("**Retrieved Chunks (Top 5 Reranked):**")
-                    if debug_nodes:
-                        for d_node in debug_nodes:
-                            st.code(d_node, language="text")
-                    else:
-                        st.warning("No nodes passed the confidence threshold (0.35).")
-
-            st.session_state.chat_history.append({"role": "user", "content": query})
-            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            # Auto-Rename Chat if it's the first message
+            if len(active_history) <= 2 and active_session["title"].startswith("New Chat"):
+                # Use the user's first query as the title (truncated)
+                new_title = query[:25] + "..." if len(query) > 25 else query
+                active_session["title"] = new_title
+                st.rerun()

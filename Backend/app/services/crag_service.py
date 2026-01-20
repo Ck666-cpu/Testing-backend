@@ -51,6 +51,17 @@ class CRAGService:
             "Name:"
         )
 
+        # D. MULTI-QUERY PROMPT
+        self.multiquery_prompt = PromptTemplate(
+            "You are an AI assistant. Your task is to generate 3 different search queries based on the user's follow-up question and conversation history.\n"
+            "1. A direct rewrite of the question.\n"
+            "2. A search for related keywords (e.g., 'fees', 'legal', 'clause').\n"
+            "3. A hypothetical answer snippet (what the document might say).\n"
+            "Context: {history_str}\n"
+            "Follow-up: {query_str}\n"
+            "Output ONLY the 3 queries, separated by a newline."
+        )
+
         # --- TUNING 3.1: Strict Answer Generation Prompt ---
         # This prevents the LLM from using its own training data.
         self.qa_prompt_tmpl = (
@@ -213,9 +224,16 @@ class CRAGService:
 
     def _rewrite_query(self, query: str, history: List[str]) -> str:
         try:
-            history_str = "\n".join(history[-2:])
-            prompt = self.rewrite_prompt.format(history_str=history_str, query_str=query)
-            return self.llm.complete(prompt).text.strip()
+            # Use last 3 turns for better context
+            history_str = "\n".join(history[-3:])
+
+            prompt = self.multiquery_prompt.format(history_str=history_str, query_str=query)
+            response = self.llm.complete(prompt).text.strip()
+
+            # Combine the user's original query with the AI's 3 variations
+            # This creates a "Mega Query" that hits multiple keywords in the vector store
+            combined_query = f"{query}\n{response}"
+            return combined_query
         except:
             return query
 
