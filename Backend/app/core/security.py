@@ -1,25 +1,64 @@
 from enum import Enum
 
+
 class UserRole(str, Enum):
+    STAFF = "staff"
     ADMIN = "admin"
-    AGENT = "agent"
-    GUEST = "guest"
+    MASTER_ADMIN = "master_admin"
+
 
 class RBAC:
     """
-    Simple Role-Based Access Control Logic.
-    Defines who can do what.
+    Strict Role-Based Access Control based on Permission Tables.
     """
     PERMISSIONS = {
-        UserRole.GUEST: ["read_general_info"],
-        UserRole.AGENT: ["read_general_info", "read_property_prices", "chat_rag"],
-        UserRole.ADMIN: ["read_general_info", "read_property_prices", "chat_rag", "ingest_documents", "delete_documents"]
+        # 1. STAFF PERMISSIONS
+        UserRole.STAFF: [
+            # Chat & Session
+            "start_chat_session",
+            "submit_chat_query",
+            "view_own_chat_history",
+
+            # Private Documents
+            "upload_private_document",
+            "view_own_private_documents",
+
+            # Global Documents
+            "view_global_documents"
+        ],
+
+        # 2. ADMIN PERMISSIONS
+        UserRole.ADMIN: [
+            # Chat & Session
+            "start_chat_session",
+            "submit_chat_query",
+            "view_own_chat_history",
+
+            # Private Documents
+            "upload_private_document",
+            "view_own_private_documents",
+
+            # Global Documents
+            "view_global_documents",
+            "upload_global_document",  # Exclusive to Admin
+
+            # User Management
+            "create_user"
+        ],
+
+        # 3. MASTER ADMIN PERMISSIONS (Strict Management Only)
+        UserRole.MASTER_ADMIN: [
+            # User Management
+            "create_user",
+            "update_user_role",  # Exclusive
+            "delete_user"  # Exclusive
+
+            # NOTE: NO CHAT, NO DOCUMENT ACCESS allowed.
+        ]
     }
 
     @staticmethod
     def check_access(user_role: UserRole, action: str) -> bool:
         """Returns True if the user_role is allowed to perform action."""
         allowed_actions = RBAC.PERMISSIONS.get(user_role, [])
-        if action in allowed_actions:
-            return True
-        return False
+        return action in allowed_actions
